@@ -1,21 +1,3 @@
-"""
-Pill Pilot backend.
-
-Two responsibilities:
-  1. Generate today's schedule for a person (POST /schedule/generate).
-  2. Handle the dynamic loop: mark a dose taken/missed, then recalculate
-     the REMAINING doses for that day around what actually happened
-     (POST /doses/{id}/taken, POST /doses/{id}/missed).
-
-Per spec section 9, this service never evaluates medical compatibility,
-never invents interactions, and never recommends dosage changes -- it
-only arranges caregiver-provided rules into a schedule.
-
-Plain CRUD (add/edit people, medications, rules) is expected to happen
-directly from Next.js against Supabase -- it doesn't need to touch this
-backend at all. This backend is specifically the Scheduling Engine
-surface, per the architecture in spec section 10.
-"""
 import os
 from datetime import date, datetime, timedelta
 from fastapi import FastAPI, HTTPException
@@ -107,7 +89,7 @@ def generate_today_schedule(req: GenerateScheduleRequest):
     "generate" and "recalculate everything" unified into one call.
     """
     target_date = req.dose_date or date.today()
-    return _solve_and_save(req.person_id, target_date)
+    return _solve_and_save(req.person_id, target_date, now_min=req.now_min)
 
 
 @app.post("/schedule/recalculate")
@@ -126,7 +108,7 @@ def recalculate_schedule(req: GenerateScheduleRequest):
     make it fit.
     """
     target_date = req.dose_date or date.today()
-    return _solve_and_save(req.person_id, target_date)
+    return _solve_and_save(req.person_id, target_date, now_min=req.now_min)
 
 
 @app.get("/schedule/today/{person_id}")
@@ -174,7 +156,14 @@ def mark_taken(dose_id: str, req: MarkTakenRequest):
 
 @app.post("/doses/{dose_id}/missed")
 def mark_missed(dose_id: str, req: MarkMissedRequest):
-    """Marks a dose missed and recalculates the rest of the day's schedule."""
+    """
+    Marks a dose missed and stops there -- it does NOT immediately
+    reschedule. The dose stays visible with status 'missed' at its
+    original scheduled_time_min until the caregiver explicitly hits
+    Recalculate (or Generate), at which point _solve_and_save picks up
+    every 'missed' medication and tries to give it a genuinely new time
+    later in the day, respecting all existing rules.
+    """
     dose_resp = supabase.table("doses").select("*").eq("id", dose_id).single().execute()
     dose = dose_resp.data
     if not dose:
@@ -182,8 +171,7 @@ def mark_missed(dose_id: str, req: MarkMissedRequest):
 
     supabase.table("doses").update({"status": "missed"}).eq("id", dose_id).execute()
 
-    med_resp = supabase.table("medications").select("person_id").eq("id", dose["medication_id"]).single().execute()
-    return _solve_and_save(med_resp.data["person_id"], dose["dose_date"])
+    return {"feasible": True, "doses": [], "conflicts": [], "message": "Marked missed"}
 
 
 @app.get("/schedule/week/{person_id}")
@@ -219,48 +207,40 @@ def get_week(person_id: str, start_date: date | None = None):
     return {"days": days_out}
 
 
-def _solve_and_save(person_id: str, dose_date) -> dict:
+def _solve_and_save(person_id: str, dose_date, now_min: int | None = None) -> dict:
     """
     The single source of truth for "what should today look like right now."
     Used by /schedule/generate, /schedule/recalculate, /schedule/week, and
-    after every taken/missed update. Handles ALL of these cases correctly
-    by always re-deriving from current state rather than patching
-    incrementally:
-
-      - First-ever generation for the day (no doses exist yet)
-      - A new medication was just added mid-day (some doses already taken)
-      - A medication/rule was edited or deleted
-      - A dose was just marked taken (locks in its actual time as an anchor)
-      - A dose was just marked missed (excluded, nothing to anchor)
+    after a Taken update. mark_missed does NOT call this -- marking missed
+    is a separate, non-rescheduling action.
 
     Medications with a 'taken' dose today keep that fixed actual time and
-    are NOT rescheduled. Medications with a 'missed' dose today are also
-    excluded (that dose is gone for today). Everything else -- including
-    a medication that has no dose row yet because it was just added --
-    gets (re)scheduled together, so a newly added medication can shift
-    other not-yet-taken doses to make room, and vice versa.
+    are NOT rescheduled.
 
-    Medications that aren't ACTIVE on this date at all (outside their
-    start/end date range, or today's weekday isn't one of their
-    days_of_week) are filtered out before any of the above -- they simply
-    don't get a dose generated for this day, no conflict, nothing to solve.
+    Medications with a 'missed' dose today go back into the solver to get
+    a new time. Critically, if now_min is provided AND dose_date is today,
+    every missed medication gets a hard constraint that its new time must
+    be AFTER now_min -- otherwise the solver has no concept of "the
+    current time" and, given no rule forces a move, the mathematically
+    optimal (and therefore chosen) answer is often the exact same
+    already-passed time as before.
 
-    Recalculation is anchored to each medication's PREVIOUS scheduled time
-    (via previous_times) so a Taken/Missed action or a newly added
-    medication doesn't cause unrelated doses to relocate unless a rule
-    genuinely requires it -- see scheduler.py's stability objective.
+    Its old 'missed' row is deleted and replaced by the new 'scheduled'
+    row so there's exactly one live entry, not a stale duplicate. If the
+    solver genuinely can't fit it in again today, that surfaces as an
+    infeasible conflict.
 
-    If the resulting set of rules has no valid solution, the `doses`
-    table is left untouched and the conflict is returned as-is -- per
-    spec section 5, we surface the problem instead of guessing which
-    rule to break.
+    Medications outside their active start/end date range or days_of_week
+    are filtered out before any of this.
+
+    If no valid schedule exists, the `doses` table is left untouched and
+    the conflict is returned as-is.
     """
     dose_date_str = str(dose_date)
     target_date = dose_date if isinstance(dose_date, date) else datetime.fromisoformat(dose_date_str).date()
 
     person, all_medications, all_rules = _fetch_person_meds_rules(person_id)
 
-    # Only medications actually active on this date go anywhere near the solver.
     medications = [m for m in all_medications if _is_med_active(m, target_date)]
     med_ids = {m["id"] for m in medications}
     rules = [r for r in all_rules if r["med_a_id"] in med_ids and r["med_b_id"] in med_ids]
@@ -279,36 +259,42 @@ def _solve_and_save(person_id: str, dose_date) -> dict:
         for d in existing
         if d["status"] == "taken" and d["actual_time_min"] is not None
     ]
-    resolved_med_ids = {d["medication_id"] for d in existing if d["status"] in ("taken", "missed")}
 
-    to_schedule = [m for m in medications if m["id"] not in resolved_med_ids]
+    taken_med_ids = {d["medication_id"] for d in existing if d["status"] == "taken"}
+    missed_med_ids = {d["medication_id"] for d in existing if d["status"] == "missed"}
+
+    to_schedule = [m for m in medications if m["id"] not in taken_med_ids]
     if not to_schedule:
         return {"feasible": True, "doses": [], "conflicts": [], "message": "Nothing left to schedule today"}
 
-    # Anchor recalculation to where each medication was ALREADY scheduled
-    # (not yet taken/missed) before this run, so a Taken/Missed action or
-    # a new medication doesn't cause unrelated doses to relocate unless a
-    # rule genuinely requires it. Only single-dose medications get this
-    # treatment (see scheduler.py's docstring on previous_times).
     previous_times = {
         d["medication_id"]: d["scheduled_time_min"]
         for d in existing
-        if d["status"] == "scheduled"
+        if d["status"] in ("scheduled", "missed")
     }
 
-    result = generate_schedule(person, to_schedule, rules, fixed_doses=fixed_doses, previous_times=previous_times)
+    # Only meaningful for TODAY -- a past/future date has no "current time"
+    # relative to it. Every missed medication must land after now.
+    not_before = {}
+    if now_min is not None and target_date == date.today():
+        not_before = {mid: now_min for mid in missed_med_ids}
+
+    result = generate_schedule(
+        person, to_schedule, rules,
+        fixed_doses=fixed_doses,
+        previous_times=previous_times,
+        not_before=not_before,
+    )
 
     if not result["feasible"]:
-        # IMPORTANT: don't touch the doses table. The caregiver sees the
-        # conflict and the previous (still-consistent) schedule stays put
-        # rather than being replaced with something broken or partial.
         return result
 
     to_schedule_ids = [m["id"] for m in to_schedule]
+
     supabase.table("doses").delete() \
         .in_("medication_id", to_schedule_ids) \
         .eq("dose_date", dose_date_str) \
-        .eq("status", "scheduled") \
+        .in_("status", ["scheduled", "missed"]) \
         .execute()
 
     rows = [

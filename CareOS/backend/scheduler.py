@@ -1,38 +1,3 @@
-"""
-Pill Pilot scheduling engine.
-
-Generates a day's dose times for one person's medications, respecting:
-  - exact / preferred / window / n_per_day / every_n_hours frequency types
-  - min/max spacing between a medication's own doses
-  - food timing relative to that person's meal times
-  - wake/sleep boundaries
-  - caregiver-defined before/after ordering and min-separation rules
-    between two different medications
-
-Priority (per spec section 5), enforced in this order:
-  1. Hard rules (windows, ordering, exact times, spacing) -- never violated.
-  2. Minimize conflicts/deviations, INCLUDING staying close to a medication's
-     previous scheduled time when recalculating -- per spec section 5,
-     "Prefer the smallest reasonable changes." Weighted more heavily than
-     preferred-time closeness so a recalculation doesn't jump a dose
-     somewhere new just because it's technically valid.
-  3. Fewer medication-taking events when allowed (not fully implemented in
-     the MVP -- noted as a possible Day-2 stretch goal).
-  4. Times close to the user's preferred times.
-
-If a fully valid schedule doesn't exist, we report infeasibility and WHICH
-rules are in tension, rather than silently dropping a rule. Per spec
-section 5: "If no completely valid schedule exists, show the problem
-instead of silently changing the user's rules."
-
-IMPORTANT (spec section 9 / "Do NOT build"): this engine only ever
-processes rules the caregiver entered. It never infers, checks, or
-invents medical compatibility between medications.
-
-Time is minutes-from-midnight throughout, discretized to 5-minute slots
-for the solver (fine enough for real scheduling, coarse enough to solve
-fast).
-"""
 from ortools.sat.python import cp_model
 
 SLOT_MINUTES = 5
@@ -67,7 +32,8 @@ def _food_window(person: dict, food_requirement: str) -> tuple[int, int] | None:
 
 def generate_schedule(person: dict, medications: list[dict], rules: list[dict],
                        fixed_doses: list[dict] | None = None,
-                       previous_times: dict | None = None) -> dict:
+                       previous_times: dict | None = None,
+                       not_before: dict | None = None) -> dict:
     """
     person: {wake_time_min, sleep_time_min, breakfast_time_min, lunch_time_min, dinner_time_min}
     medications: [{id, name, frequency_type, doses_per_day, interval_hours,
@@ -84,11 +50,17 @@ def generate_schedule(person: dict, medications: list[dict], rules: list[dict],
                  have to" pull. Only the FIRST dose per medication is anchored
                  this way; multi-dose-per-day medications skip stability (edge
                  case, acceptable for MVP).
+    not_before: {medication_id: minute} -- a HARD constraint that this
+                 medication's dose must land at or after this minute. Used
+                 for a missed dose being rescheduled, so it can't just get
+                 slotted back into an already-passed time when nothing else
+                 forces a move.
 
     Returns: {feasible: bool, doses: [...], conflicts: [...]}
     """
     fixed_doses = fixed_doses or []
     previous_times = previous_times or {}
+    not_before = not_before or {}
     fixed_by_med = {}
     for fd in fixed_doses:
         fixed_by_med.setdefault(fd["medication_id"], []).append(fd["actual_time_min"])
@@ -112,10 +84,22 @@ def generate_schedule(person: dict, medications: list[dict], rules: list[dict],
             continue
 
         n_doses = med.get("doses_per_day", 1)
-        window_start = max(wake_slot, _slot(med.get("window_start_min", person["wake_time_min"])))
-        window_end = min(sleep_slot, _slot(med.get("window_end_min", person["sleep_time_min"])))
-        if window_end <= window_start:
-            window_end = min(sleep_slot, window_start + 12)  # fallback: ~1 hour
+
+        if med["frequency_type"] == "exact":
+            window_start = wake_slot
+            window_end = sleep_slot
+        else:
+            window_start = max(wake_slot, _slot(med.get("window_start_min", person["wake_time_min"])))
+            window_end = min(sleep_slot, _slot(med.get("window_end_min", person["sleep_time_min"])))
+            if window_end <= window_start:
+                window_end = min(sleep_slot, window_start + 12)  # fallback: ~1 hour
+
+        # A missed dose being rescheduled can't land before "now" -- tighten
+        # the domain's lower bound directly so it's baked into the variable.
+        if med_id in not_before:
+            window_start = max(window_start, _slot(not_before[med_id]))
+            if window_end < window_start:
+                window_end = window_start  # no room left today -> infeasible
 
         doses = []
         for i in range(n_doses):
@@ -151,10 +135,13 @@ def generate_schedule(person: dict, medications: list[dict], rules: list[dict],
         # --- Stability: soft pull toward where this dose was already
         # scheduled, so a recalculation doesn't relocate it unless the
         # changed rules actually force a move. Skipped for 'exact' (already
-        # pinned) and for multi-dose meds (ambiguous which dose maps to which).
+        # pinned), multi-dose meds, and anything with a not_before override
+        # (pulling toward an already-passed time would fight the constraint
+        # we just added above).
         if (n_doses == 1
                 and med["frequency_type"] != "exact"
-                and med_id in previous_times):
+                and med_id in previous_times
+                and med_id not in not_before):
             prev_slot = _slot(previous_times[med_id])
             stab = model.NewIntVar(0, SLOTS_PER_DAY, f"{med_id}_stab")
             model.AddAbsEquality(stab, doses[0] - prev_slot)

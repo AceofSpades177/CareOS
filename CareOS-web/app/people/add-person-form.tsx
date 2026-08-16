@@ -58,12 +58,13 @@ export default function AddPersonForm() {
 
   const inputClass =
     "block w-full mt-1 px-3 py-2 rounded-xl border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+  const labelClass = "text-sm font-medium text-muted-foreground"
 
   return (
-    <form onSubmit={handleSubmit} className="careos-card p-6 flex flex-col gap-4 max-w-sm">
-      <h2 className="text-lg font-semibold">Add Person</h2>
+    <form onSubmit={handleSubmit} className="careos-card p-6 flex flex-col gap-4 w-full">
+      <h2 className="text-lg font-semibold text-center">Add Person</h2>
 
-      <label className="text-sm font-medium text-muted-foreground">
+      <label className={labelClass}>
         Name
         <input
           value={name}
@@ -73,61 +74,63 @@ export default function AddPersonForm() {
         />
       </label>
 
-      <label className="text-sm font-medium text-muted-foreground">
-        Wake time
-        <input
-          type="time"
-          value={wakeTime}
-          onChange={(e) => setWakeTime(e.target.value)}
-          className={inputClass}
-        />
-      </label>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className={labelClass}>
+          Wake time
+          <input
+            type="time"
+            value={wakeTime}
+            onChange={(e) => setWakeTime(e.target.value)}
+            className={inputClass}
+          />
+        </label>
 
-      <label className="text-sm font-medium text-muted-foreground">
-        Sleep time
-        <input
-          type="time"
-          value={sleepTime}
-          onChange={(e) => setSleepTime(e.target.value)}
-          className={inputClass}
-        />
-      </label>
+        <label className={labelClass}>
+          Sleep time
+          <input
+            type="time"
+            value={sleepTime}
+            onChange={(e) => setSleepTime(e.target.value)}
+            className={inputClass}
+          />
+        </label>
 
-      <label className="text-sm font-medium text-muted-foreground">
-        Breakfast time
-        <input
-          type="time"
-          value={breakfastTime}
-          onChange={(e) => setBreakfastTime(e.target.value)}
-          className={inputClass}
-        />
-      </label>
+        <label className={labelClass}>
+          Breakfast time
+          <input
+            type="time"
+            value={breakfastTime}
+            onChange={(e) => setBreakfastTime(e.target.value)}
+            className={inputClass}
+          />
+        </label>
 
-      <label className="text-sm font-medium text-muted-foreground">
-        Lunch time
-        <input
-          type="time"
-          value={lunchTime}
-          onChange={(e) => setLunchTime(e.target.value)}
-          className={inputClass}
-        />
-      </label>
+        <label className={labelClass}>
+          Lunch time
+          <input
+            type="time"
+            value={lunchTime}
+            onChange={(e) => setLunchTime(e.target.value)}
+            className={inputClass}
+          />
+        </label>
 
-      <label className="text-sm font-medium text-muted-foreground">
-        Dinner time
-        <input
-          type="time"
-          value={dinnerTime}
-          onChange={(e) => setDinnerTime(e.target.value)}
-          className={inputClass}
-        />
-      </label>
+        <label className={`${labelClass} sm:col-span-2`}>
+          Dinner time
+          <input
+            type="time"
+            value={dinnerTime}
+            onChange={(e) => setDinnerTime(e.target.value)}
+            className={inputClass}
+          />
+        </label>
+      </div>
 
-      <button type="submit" disabled={saving} className="careos-button mt-2">
+      <button type="submit" disabled={saving} className="careos-button mt-2 self-center">
         {saving ? 'Saving…' : 'Add Person'}
       </button>
 
-      {error && <p className="text-destructive text-sm">{error}</p>}
+      {error && <p className="text-destructive text-sm text-center">{error}</p>}
     </form>
   )
 }

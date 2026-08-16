@@ -1,5 +1,3 @@
-"""Pydantic request/response models, matching the spec's core data model:
-Person, Medication, Dose. A Medication is rules; a Dose is one event."""
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date
@@ -8,6 +6,7 @@ from datetime import date
 class GenerateScheduleRequest(BaseModel):
     person_id: str
     dose_date: Optional[date] = None  # defaults to today in the endpoint
+    now_min: Optional[int] = None     # caller's current clock time, minutes-from-midnight
 
 
 class MarkTakenRequest(BaseModel):

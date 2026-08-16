@@ -71,7 +71,7 @@ export default function TodayPage({ params }: { params: Promise<{ personId: stri
     const res = await fetch(`${API}/schedule/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ person_id: personId }),
+      body: JSON.stringify({ person_id: personId, now_min: nowMinutes() }),
     })
     const data = await res.json()
     handleEngineResult(data)
